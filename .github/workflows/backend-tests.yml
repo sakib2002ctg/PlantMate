@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql+psycopg://ci_test:ci_test@127.0.0.1:5432/plantmate_ci_test
     defaults:
       run:
         working-directory: backend
