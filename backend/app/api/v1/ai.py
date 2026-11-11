@@ -85,6 +85,7 @@ def status() -> AIStatus:
     return AIStatus(
         configured=groq_ready or gemini_ready,
         model=settings.groq_model if groq_ready else settings.gemini_model,
+        provider="groq" if groq_ready else "gemini" if gemini_ready else None,
     )
 
 

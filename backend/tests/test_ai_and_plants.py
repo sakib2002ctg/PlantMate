@@ -42,18 +42,33 @@ def test_gemini_missing_key_is_safe(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_gemini_timeout_is_sanitized_and_logged_safely(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    error = service._timeout_error(httpx.ReadTimeout("private request details"), 60.127)
+    error = service._timeout_error("gemini", httpx.ReadTimeout("private request details"), 60.127)
 
     assert service.GEMINI_TIMEOUT_SECONDS == 60.0
     assert error.args == ("AI adviser is temporarily unavailable",)
-    assert "Gemini request timed out" in caplog.text
+    assert "AI provider request timed out" in caplog.text
     assert "private request details" not in caplog.text
     assert "private sensor prompt" not in caplog.text
     assert "test-provider-key" not in caplog.text
     record = caplog.records[-1]
-    assert record.event == "gemini_timeout"
+    assert record.event == "ai_provider_timeout"
+    assert record.provider == "gemini"
+    assert record.error_category == "timeout"
+    assert record.http_status is None
     assert record.exception_class == "ReadTimeout"
     assert record.elapsed_seconds == 60.127
+
+
+def test_provider_failure_log_has_safe_provider_fields(caplog) -> None:
+    service._log_failure("groq", "authentication", "HTTPStatusError", 0.25, 401)
+    record = caplog.records[-1]
+    assert record.provider == "groq"
+    assert record.error_category == "authentication"
+    assert record.http_status == 401
+    assert record.exception_class == "HTTPStatusError"
+    assert record.elapsed_seconds == 0.25
+    assert "private-api-key" not in caplog.text
+    assert "full private prompt" not in caplog.text
 
 
 def test_prompt_marks_raw_adc_and_tds_as_estimates() -> None:
@@ -399,6 +414,34 @@ def test_provider_error_does_not_expose_details(monkeypatch: pytest.MonkeyPatch)
     assert error.status_code == 502
     assert error.detail == "AI adviser is temporarily unavailable"
     assert "private" not in error.detail
+
+
+@pytest.mark.parametrize(
+    ("groq_key", "gemini_key", "provider", "model"),
+    [
+        (SecretStr("groq-hidden"), SecretStr("gemini-hidden"), "groq", "groq-model"),
+        (None, SecretStr("gemini-hidden"), "gemini", "gemini-model"),
+        (None, None, None, "groq-model"),
+    ],
+)
+def test_ai_status_reports_primary_provider_without_credentials(
+    monkeypatch, groq_key, gemini_key, provider, model
+) -> None:
+    monkeypatch.setattr(
+        ai,
+        "get_settings",
+        lambda: SimpleNamespace(
+            groq_api_key=groq_key,
+            groq_model="groq-model",
+            gemini_api_key=gemini_key,
+            gemini_model="gemini-model",
+        ),
+    )
+    status = ai.status()
+    assert status.configured is (provider is not None)
+    assert status.provider == provider
+    assert status.model == model
+    assert "hidden" not in status.model
 
 
 def test_plant_profile_validates_device_and_lengths() -> None:
