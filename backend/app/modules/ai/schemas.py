@@ -24,3 +24,4 @@ class WeeklySummaryResponse(BaseModel):
 class AIStatus(BaseModel):
     configured: bool
     model: str
+    provider: Literal["groq", "gemini"] | None = None

@@ -31,11 +31,16 @@ def require_api_key() -> tuple[str, str]:
     return key, settings.gemini_model
 
 
-def _timeout_error(exc: httpx.TimeoutException, elapsed_seconds: float) -> AIUnavailableError:
+def _timeout_error(
+    provider: str, exc: httpx.TimeoutException, elapsed_seconds: float
+) -> AIUnavailableError:
     logger.warning(
-        "Gemini request timed out",
+        "AI provider request timed out",
         extra={
-            "event": "gemini_timeout",
+            "event": "ai_provider_timeout",
+            "provider": provider,
+            "error_category": "timeout",
+            "http_status": None,
             "exception_class": type(exc).__name__,
             "elapsed_seconds": round(elapsed_seconds, 3),
         },
@@ -59,12 +64,17 @@ def _retry_after(response: httpx.Response) -> float:
 
 
 def _log_failure(
-    category: str, exception_class: str, elapsed: float, status: int | None = None
+    provider: str,
+    category: str,
+    exception_class: str,
+    elapsed: float,
+    status: int | None = None,
 ) -> None:
     logger.warning(
-        "Gemini provider request failed",
+        "AI provider request failed",
         extra={
-            "event": "gemini_provider_failure",
+            "event": "ai_provider_failure",
+            "provider": provider,
             "http_status": status,
             "exception_class": exception_class,
             "elapsed_seconds": round(elapsed, 3),
@@ -191,7 +201,8 @@ async def _generate_provider(
                         503: "service_unavailable",
                     }.get(response.status_code, "http_error")
                     _log_failure(
-                        f"{provider}_{category}",
+                        provider,
+                        category,
                         "HTTPStatusError",
                         time.monotonic() - started_at,
                         response.status_code,
@@ -208,14 +219,15 @@ async def _generate_provider(
                 raise AIUnavailableError("AI adviser returned no answer")
             return answer.strip()
     except httpx.TimeoutException as exc:
-        _timeout_error(exc, time.monotonic() - started_at)
-        _log_failure(f"{provider}_timeout", type(exc).__name__, time.monotonic() - started_at)
+        elapsed = time.monotonic() - started_at
+        _timeout_error(provider, exc, elapsed)
         raise AIUnavailableError("AI adviser is temporarily unavailable") from None
     except AIUnavailableError:
         raise
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         _log_failure(
-            f"{provider}_transport_or_invalid_response",
+            provider,
+            "transport_or_invalid_response",
             type(exc).__name__,
             time.monotonic() - started_at,
         )
