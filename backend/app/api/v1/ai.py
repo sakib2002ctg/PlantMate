@@ -34,7 +34,11 @@ def enforce_rate_limit(request: Request) -> None:
 
 def _provider_error(error: AIUnavailableError) -> HTTPException:
     settings = get_settings()
-    if settings.gemini_api_key is None or not settings.gemini_api_key.get_secret_value():
+    configured = any(
+        key is not None and bool(key.get_secret_value())
+        for key in (settings.groq_api_key, settings.gemini_api_key)
+    )
+    if not configured:
         return HTTPException(status_code=503, detail="AI adviser is not configured")
     return HTTPException(status_code=502, detail="AI adviser is temporarily unavailable")
 
@@ -76,16 +80,16 @@ def _reading_context(readings: list[SensorReading]) -> list[dict[str, object]]:
 @router.get("/status", response_model=AIStatus)
 def status() -> AIStatus:
     settings = get_settings()
+    groq_ready = bool(settings.groq_api_key and settings.groq_api_key.get_secret_value())
+    gemini_ready = bool(settings.gemini_api_key and settings.gemini_api_key.get_secret_value())
     return AIStatus(
-        configured=bool(settings.gemini_api_key and settings.gemini_api_key.get_secret_value()),
-        model=settings.gemini_model,
+        configured=groq_ready or gemini_ready,
+        model=settings.groq_model if groq_ready else settings.gemini_model,
     )
 
 
 @router.post("/chat", response_model=ChatResponse, dependencies=[Depends(enforce_rate_limit)])
-async def chat(
-    payload: ChatRequest, db: Session = Depends(get_db)
-) -> ChatResponse:
+async def chat(payload: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
     profile, readings = _context(db)
     prompt = grounded_prompt(profile, _reading_context(readings), payload.question)
     try:
