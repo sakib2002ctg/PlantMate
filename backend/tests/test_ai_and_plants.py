@@ -28,7 +28,12 @@ def test_gemini_missing_key_is_safe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         service,
         "get_settings",
-        lambda: SimpleNamespace(gemini_api_key=None, gemini_model="gemini-test"),
+        lambda: SimpleNamespace(
+            groq_api_key=None,
+            groq_model="groq-test",
+            gemini_api_key=None,
+            gemini_model="gemini-test",
+        ),
     )
     with pytest.raises(service.AIUnavailableError, match="not configured"):
         service.require_api_key()
@@ -133,7 +138,10 @@ async def test_provider_retry_policy(monkeypatch, caplog, statuses, expected_cal
         service,
         "get_settings",
         lambda: SimpleNamespace(
-            gemini_api_key=SecretStr("private-api-key"), gemini_model="gemini-test"
+            groq_api_key=None,
+            groq_model="groq-test",
+            gemini_api_key=SecretStr("private-api-key"),
+            gemini_model="gemini-test",
         ),
     )
     if statuses[0] >= 400 and statuses[0] != 503:
@@ -175,7 +183,10 @@ async def test_provider_timeout_is_not_retried(monkeypatch, error, caplog):
         service,
         "get_settings",
         lambda: SimpleNamespace(
-            gemini_api_key=SecretStr("private-api-key"), gemini_model="gemini-test"
+            groq_api_key=None,
+            groq_model="groq-test",
+            gemini_api_key=SecretStr("private-api-key"),
+            gemini_model="gemini-test",
         ),
     )
     with pytest.raises(service.AIUnavailableError):
@@ -377,7 +388,12 @@ def test_provider_error_does_not_expose_details(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         ai,
         "get_settings",
-        lambda: SimpleNamespace(gemini_api_key=SecretStr("hidden")),
+        lambda: SimpleNamespace(
+            groq_api_key=None,
+            groq_model="groq-test",
+            gemini_api_key=SecretStr("hidden"),
+            gemini_model="gemini-test",
+        ),
     )
     error = ai._provider_error(service.AIUnavailableError("private upstream detail"))
     assert error.status_code == 502
