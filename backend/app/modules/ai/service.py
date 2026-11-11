@@ -118,36 +118,71 @@ def _grounding_context(profile: object, readings: list[dict[str, object]]) -> st
 
 
 async def generate(prompt: str, language: str) -> str:
-    api_key, model = require_api_key()
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    settings = get_settings()
+    providers = []
+    if settings.groq_api_key and settings.groq_api_key.get_secret_value():
+        providers.append(("groq", settings.groq_api_key.get_secret_value(), settings.groq_model))
+    if settings.gemini_api_key and settings.gemini_api_key.get_secret_value():
+        providers.append(
+            ("gemini", settings.gemini_api_key.get_secret_value(), settings.gemini_model)
+        )
+    if not providers:
+        raise AIUnavailableError("AI adviser is not configured")
     if len(prompt) > MAX_PROMPT_CHARS:
         raise AIUnavailableError("AI adviser context is too large")
+    last_error = None
+    for provider, api_key, model in providers:
+        try:
+            return await _generate_provider(provider, api_key, model, prompt, language)
+        except AIUnavailableError as exc:
+            last_error = exc
+    raise last_error or AIUnavailableError("AI adviser is temporarily unavailable")
+
+
+async def _generate_provider(
+    provider: str, api_key: str, model: str, prompt: str, language: str
+) -> str:
+    endpoint = (
+        "https://api.groq.com/openai/v1/chat/completions"
+        if provider == "groq"
+        else f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    )
+    system_text = (
+        "Answer safely and simply in "
+        + ("Bangla" if language == "bn" else "English")
+        + ". Use only supplied sensor facts."
+    )
     started_at = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_SECONDS) as client:
             for attempt in range(2):
-                response = await client.post(
-                    endpoint,
-                    headers={"x-goog-api-key": api_key},
-                    json={
-                        "system_instruction": {
-                            "parts": [
-                                {
-                                    "text": "Answer safely and simply in "
-                                    + ("Bangla" if language == "bn" else "English")
-                                    + ". Use only the supplied sensor facts."
-                                }
-                            ]
-                        },
+                headers = (
+                    {"Authorization": f"Bearer {api_key}"}
+                    if provider == "groq"
+                    else {"x-goog-api-key": api_key}
+                )
+                payload = (
+                    {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_text},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "max_tokens": 700,
+                        "temperature": 0.3,
+                    }
+                    if provider == "groq"
+                    else {
+                        "system_instruction": {"parts": [{"text": system_text}]},
                         "contents": [{"parts": [{"text": prompt}]}],
                         "generationConfig": {"maxOutputTokens": 700, "temperature": 0.3},
-                    },
+                    }
                 )
+                response = await client.post(endpoint, headers=headers, json=payload)
                 if response.status_code == 503 and attempt == 0:
                     await retry_sleep(_retry_after(response))
                     continue
                 if response.is_error:
-                    elapsed = time.monotonic() - started_at
                     category = {
                         401: "authentication",
                         403: "authorization",
@@ -155,21 +190,34 @@ async def generate(prompt: str, language: str) -> str:
                         429: "rate_limit",
                         503: "service_unavailable",
                     }.get(response.status_code, "http_error")
-                    _log_failure(category, "HTTPStatusError", elapsed, response.status_code)
+                    _log_failure(
+                        f"{provider}_{category}",
+                        "HTTPStatusError",
+                        time.monotonic() - started_at,
+                        response.status_code,
+                    )
                     raise AIUnavailableError("AI adviser is temporarily unavailable")
                 break
             result = response.json()
-            answer = result["candidates"][0]["content"]["parts"][0]["text"]
+            answer = (
+                result["choices"][0]["message"]["content"]
+                if provider == "groq"
+                else result["candidates"][0]["content"]["parts"][0]["text"]
+            )
             if not isinstance(answer, str) or not answer.strip():
                 raise AIUnavailableError("AI adviser returned no answer")
             return answer.strip()
     except httpx.TimeoutException as exc:
-        raise _timeout_error(exc, time.monotonic() - started_at) from None
+        _timeout_error(exc, time.monotonic() - started_at)
+        _log_failure(f"{provider}_timeout", type(exc).__name__, time.monotonic() - started_at)
+        raise AIUnavailableError("AI adviser is temporarily unavailable") from None
     except AIUnavailableError:
         raise
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         _log_failure(
-            "transport_or_invalid_response", type(exc).__name__, time.monotonic() - started_at
+            f"{provider}_transport_or_invalid_response",
+            type(exc).__name__,
+            time.monotonic() - started_at,
         )
         raise AIUnavailableError("AI adviser is temporarily unavailable") from None
 

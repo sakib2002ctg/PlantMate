@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     device_ingestion_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-2.0-flash"
+    groq_api_key: SecretStr | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
     api_v1_prefix: str = "/api/v1"
     cors_allowed_origins: str = "http://localhost:5173"
     device_online_window_seconds: int = 120
