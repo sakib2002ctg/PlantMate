@@ -1,0 +1,1 @@
+"""Plant profile domain module."""

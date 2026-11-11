@@ -1,0 +1,1 @@
+"""PlantMate backend application package."""

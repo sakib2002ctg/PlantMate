@@ -1,0 +1,35 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+# Firebase Admin service-account keys must stay outside version control.
+*firebase-adminsdk*.json
+*service-account*.json
+*service_account*.json
+firebase-service-account.json
+firmware/esp32/PlantMateESP32/plantmate_secrets.h
+backend/.venv/
+backend/.tmp/
+*.egg-info/
+frontend/node_modules/
+
+# Build and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+frontend/dist/
+coverage/
+
+# Local data and editor files
+postgres_data/
+.vscode/
+.idea/
+*.log
+*.swp
+Thumbs.db
+
+**/.venv/
+**/node_modules/
+*.dump
+*.sql
