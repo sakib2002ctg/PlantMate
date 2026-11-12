@@ -44,7 +44,7 @@ All application routes use `/api/v1`.
 | `POST` | `/api/v1/ingestion/readings` | ESP32 device key required | Validate and store one sensor packet; returns 201 |
 | `GET` | `/health`, `/api/v1/health`, `/api/v1/health/db` | Public | Service and database health |
 | `GET` / `PUT` | `/api/v1/plants/profile` | Public demo profile | Read or update the single garden plant profile |
-| `GET` | `/api/v1/ai/status` | Public | Gemini configuration status (never returns the key) |
+| `GET` | `/api/v1/ai/status` | Public | Groq configuration status (never returns the key) |
 | `POST` | `/api/v1/ai/chat` | Public, rate limited | Ask a plant-care question grounded in stored profile/readings |
 | `POST` | `/api/v1/ai/weekly-summary?language=en` | Public, rate limited | Summarize actual sensor data stored in the last week |
 
@@ -65,7 +65,7 @@ Plant status is a small deterministic heuristic based only on received calibrate
 - For a cloud backend, set `API_URL` to its HTTPS ingestion URL and place its trusted root CA PEM in `ROOT_CA_CERT` in the ignored header. The firmware verifies TLS certificates and refuses HTTPS if no CA is configured; do not disable certificate validation.
 - Deploy FastAPI on a platform that supports Python, environment variables/secrets, and outbound PostgreSQL connections. Configure `DATABASE_URL`, `DEVICE_INGESTION_KEY`, `CORS_ALLOWED_ORIGINS`, and optionally `DEVICE_ONLINE_WINDOW_SECONDS` in the backend environment. Use a managed PostgreSQL service and TLS settings required by that provider.
 - Deploy `frontend/` to Vercel. Set `VITE_API_BASE_URL` to the deployed backend origin followed by `/api/v1`. Set backend `CORS_ALLOWED_ORIGINS` to the exact frontend origin, such as `https://your-project.vercel.app` (comma-separated for multiple origins). Dashboard reads are public and the device key is sent only by ESP32.
-- For the AI adviser, set backend-only `GEMINI_API_KEY` and optionally `GEMINI_MODEL` (defaults to `gemini-2.0-flash`) in `.env` or the hosting provider's secret manager. Never create a `VITE_GEMINI_API_KEY` or put the provider key in frontend configuration. AI requests are capped at 2,000 question characters, 8 KB request size, 20 seconds provider timeout, and five requests per client IP per minute per backend process. AI routes return a clear unavailable response when no key is configured; the public live dashboard continues to work.
+- For the AI adviser, set backend-only `GROQ_API_KEY` and optionally `GROQ_MODEL` in `.env` or the hosting provider's secret manager. Never put the provider key in frontend configuration. AI requests are capped at 2,000 question characters, 8 KB request size, 60 seconds provider timeout, and five requests per client IP per minute per backend process. The adviser uses Groq only and returns a safe unavailable response when Groq is not configured or fails; the public live dashboard and deterministic care status continue to work.
 
 ## Database history and migrations
 
