@@ -34,10 +34,7 @@ def enforce_rate_limit(request: Request) -> None:
 
 def _provider_error(error: AIUnavailableError) -> HTTPException:
     settings = get_settings()
-    configured = any(
-        key is not None and bool(key.get_secret_value())
-        for key in (settings.groq_api_key, settings.gemini_api_key)
-    )
+    configured = bool(settings.groq_api_key and settings.groq_api_key.get_secret_value())
     if not configured:
         return HTTPException(status_code=503, detail="AI adviser is not configured")
     return HTTPException(status_code=502, detail="AI adviser is temporarily unavailable")
@@ -81,10 +78,9 @@ def _reading_context(readings: list[SensorReading]) -> list[dict[str, object]]:
 def status() -> AIStatus:
     settings = get_settings()
     groq_ready = bool(settings.groq_api_key and settings.groq_api_key.get_secret_value())
-    gemini_ready = bool(settings.gemini_api_key and settings.gemini_api_key.get_secret_value())
     return AIStatus(
-        configured=groq_ready or gemini_ready,
-        model=settings.groq_model if groq_ready else settings.gemini_model,
+        configured=groq_ready,
+        model=settings.groq_model,
     )
 
 

@@ -1,4 +1,4 @@
-"""Gemini adapter grounded exclusively in supplied PlantMate measurements."""
+"""Groq adapter grounded exclusively in supplied PlantMate measurements."""
 
 import asyncio
 import email.utils
@@ -12,7 +12,7 @@ import httpx
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
-GEMINI_TIMEOUT_SECONDS = 60.0
+GROQ_TIMEOUT_SECONDS = 60.0
 MAX_PROMPT_CHARS = 12_000
 MAX_READING_CONTEXT = 20
 MAX_RETRY_AFTER_SECONDS = 5.0
@@ -20,22 +20,25 @@ retry_sleep = asyncio.sleep
 
 
 class AIUnavailableError(Exception):
-    """Provider key is absent or Gemini failed safely."""
+    """Groq credentials are absent or the provider failed safely."""
 
 
 def require_api_key() -> tuple[str, str]:
     settings = get_settings()
-    key = settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else ""
+    key = settings.groq_api_key.get_secret_value() if settings.groq_api_key else ""
     if not key:
         raise AIUnavailableError("AI adviser is not configured")
-    return key, settings.gemini_model
+    return key, settings.groq_model
 
 
 def _timeout_error(exc: httpx.TimeoutException, elapsed_seconds: float) -> AIUnavailableError:
     logger.warning(
-        "Gemini request timed out",
+        "AI provider request timed out",
         extra={
-            "event": "gemini_timeout",
+            "event": "ai_provider_timeout",
+            "provider": "groq",
+            "error_category": "timeout",
+            "http_status": None,
             "exception_class": type(exc).__name__,
             "elapsed_seconds": round(elapsed_seconds, 3),
         },
@@ -62,9 +65,10 @@ def _log_failure(
     category: str, exception_class: str, elapsed: float, status: int | None = None
 ) -> None:
     logger.warning(
-        "Gemini provider request failed",
+        "AI provider request failed",
         extra={
-            "event": "gemini_provider_failure",
+            "event": "ai_provider_failure",
+            "provider": "groq",
             "http_status": status,
             "exception_class": exception_class,
             "elapsed_seconds": round(elapsed, 3),
@@ -118,35 +122,10 @@ def _grounding_context(profile: object, readings: list[dict[str, object]]) -> st
 
 
 async def generate(prompt: str, language: str) -> str:
-    settings = get_settings()
-    providers = []
-    if settings.groq_api_key and settings.groq_api_key.get_secret_value():
-        providers.append(("groq", settings.groq_api_key.get_secret_value(), settings.groq_model))
-    if settings.gemini_api_key and settings.gemini_api_key.get_secret_value():
-        providers.append(
-            ("gemini", settings.gemini_api_key.get_secret_value(), settings.gemini_model)
-        )
-    if not providers:
-        raise AIUnavailableError("AI adviser is not configured")
+    api_key, model = require_api_key()
     if len(prompt) > MAX_PROMPT_CHARS:
         raise AIUnavailableError("AI adviser context is too large")
-    last_error = None
-    for provider, api_key, model in providers:
-        try:
-            return await _generate_provider(provider, api_key, model, prompt, language)
-        except AIUnavailableError as exc:
-            last_error = exc
-    raise last_error or AIUnavailableError("AI adviser is temporarily unavailable")
-
-
-async def _generate_provider(
-    provider: str, api_key: str, model: str, prompt: str, language: str
-) -> str:
-    endpoint = (
-        "https://api.groq.com/openai/v1/chat/completions"
-        if provider == "groq"
-        else f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    )
+    endpoint = "https://api.groq.com/openai/v1/chat/completions"
     system_text = (
         "Answer safely and simply in "
         + ("Bangla" if language == "bn" else "English")
@@ -154,15 +133,12 @@ async def _generate_provider(
     )
     started_at = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=GROQ_TIMEOUT_SECONDS) as client:
             for attempt in range(2):
-                headers = (
-                    {"Authorization": f"Bearer {api_key}"}
-                    if provider == "groq"
-                    else {"x-goog-api-key": api_key}
-                )
-                payload = (
-                    {
+                response = await client.post(
+                    endpoint,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={
                         "model": model,
                         "messages": [
                             {"role": "system", "content": system_text},
@@ -170,15 +146,8 @@ async def _generate_provider(
                         ],
                         "max_tokens": 700,
                         "temperature": 0.3,
-                    }
-                    if provider == "groq"
-                    else {
-                        "system_instruction": {"parts": [{"text": system_text}]},
-                        "contents": [{"parts": [{"text": prompt}]}],
-                        "generationConfig": {"maxOutputTokens": 700, "temperature": 0.3},
-                    }
+                    },
                 )
-                response = await client.post(endpoint, headers=headers, json=payload)
                 if response.status_code == 503 and attempt == 0:
                     await retry_sleep(_retry_after(response))
                     continue
@@ -191,7 +160,7 @@ async def _generate_provider(
                         503: "service_unavailable",
                     }.get(response.status_code, "http_error")
                     _log_failure(
-                        f"{provider}_{category}",
+                        category,
                         "HTTPStatusError",
                         time.monotonic() - started_at,
                         response.status_code,
@@ -199,23 +168,19 @@ async def _generate_provider(
                     raise AIUnavailableError("AI adviser is temporarily unavailable")
                 break
             result = response.json()
-            answer = (
-                result["choices"][0]["message"]["content"]
-                if provider == "groq"
-                else result["candidates"][0]["content"]["parts"][0]["text"]
-            )
+            answer = result["choices"][0]["message"]["content"]
             if not isinstance(answer, str) or not answer.strip():
                 raise AIUnavailableError("AI adviser returned no answer")
             return answer.strip()
     except httpx.TimeoutException as exc:
         _timeout_error(exc, time.monotonic() - started_at)
-        _log_failure(f"{provider}_timeout", type(exc).__name__, time.monotonic() - started_at)
+        _log_failure("timeout", type(exc).__name__, time.monotonic() - started_at)
         raise AIUnavailableError("AI adviser is temporarily unavailable") from None
     except AIUnavailableError:
         raise
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         _log_failure(
-            f"{provider}_transport_or_invalid_response",
+            "transport_or_invalid_response",
             type(exc).__name__,
             time.monotonic() - started_at,
         )

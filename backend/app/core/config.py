@@ -24,8 +24,6 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_url: SecretStr
     device_ingestion_key: SecretStr | None = None
-    gemini_api_key: SecretStr | None = None
-    gemini_model: str = "gemini-2.0-flash"
     groq_api_key: SecretStr | None = None
     groq_model: str = "llama-3.3-70b-versatile"
     api_v1_prefix: str = "/api/v1"

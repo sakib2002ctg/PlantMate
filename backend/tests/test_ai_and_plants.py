@@ -24,34 +24,33 @@ def test_chat_request_bounds_and_language() -> None:
         ChatRequest(question="Hello", language="fr")
 
 
-def test_gemini_missing_key_is_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_groq_missing_key_is_safe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         service,
         "get_settings",
         lambda: SimpleNamespace(
             groq_api_key=None,
             groq_model="groq-test",
-            gemini_api_key=None,
-            gemini_model="gemini-test",
         ),
     )
     with pytest.raises(service.AIUnavailableError, match="not configured"):
         service.require_api_key()
 
 
-def test_gemini_timeout_is_sanitized_and_logged_safely(
+def test_groq_timeout_is_sanitized_and_logged_safely(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     error = service._timeout_error(httpx.ReadTimeout("private request details"), 60.127)
 
-    assert service.GEMINI_TIMEOUT_SECONDS == 60.0
+    assert service.GROQ_TIMEOUT_SECONDS == 60.0
     assert error.args == ("AI adviser is temporarily unavailable",)
-    assert "Gemini request timed out" in caplog.text
+    assert "AI provider request timed out" in caplog.text
     assert "private request details" not in caplog.text
     assert "private sensor prompt" not in caplog.text
     assert "test-provider-key" not in caplog.text
     record = caplog.records[-1]
-    assert record.event == "gemini_timeout"
+    assert record.event == "ai_provider_timeout"
+    assert record.provider == "groq"
     assert record.exception_class == "ReadTimeout"
     assert record.elapsed_seconds == 60.127
 
@@ -111,7 +110,7 @@ async def test_provider_retry_policy(monkeypatch, caplog, statuses, expected_cal
             self.is_error = status >= 400
 
         def json(self):
-            return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+            return {"choices": [{"message": {"content": "Test AI response"}}]}
 
     class FakeClient:
         def __init__(self, **kwargs):
@@ -138,10 +137,8 @@ async def test_provider_retry_policy(monkeypatch, caplog, statuses, expected_cal
         service,
         "get_settings",
         lambda: SimpleNamespace(
-            groq_api_key=None,
+            groq_api_key=SecretStr("private-api-key"),
             groq_model="groq-test",
-            gemini_api_key=SecretStr("private-api-key"),
-            gemini_model="gemini-test",
         ),
     )
     if statuses[0] >= 400 and statuses[0] != 503:
@@ -151,10 +148,13 @@ async def test_provider_retry_policy(monkeypatch, caplog, statuses, expected_cal
         with pytest.raises(service.AIUnavailableError):
             await service.generate("private complete prompt", "en")
     else:
-        assert await service.generate("private complete prompt", "en") == "ok"
+        assert (
+            await service.generate("private complete prompt", "en")
+            == "Test AI response"
+        )
     assert len(calls) == expected_calls
     assert delays == ([5.0] if statuses[0] == 503 else [])
-    assert all("x-goog-api-key" in call["headers"] for call in calls)
+    assert all("Authorization" in call["headers"] for call in calls)
     assert "private-api-key" not in caplog.text
     assert "private complete prompt" not in caplog.text
 
@@ -183,10 +183,8 @@ async def test_provider_timeout_is_not_retried(monkeypatch, error, caplog):
         service,
         "get_settings",
         lambda: SimpleNamespace(
-            groq_api_key=None,
+            groq_api_key=SecretStr("private-api-key"),
             groq_model="groq-test",
-            gemini_api_key=SecretStr("private-api-key"),
-            gemini_model="gemini-test",
         ),
     )
     with pytest.raises(service.AIUnavailableError):
@@ -197,31 +195,26 @@ async def test_provider_timeout_is_not_retried(monkeypatch, error, caplog):
 
 
 @pytest.mark.parametrize(
-    ("groq_status", "gemini_status", "expected"),
+    ("statuses", "expected"),
     [
-        (200, 200, "groq answer"),
-        (503, 200, "gemini answer"),
-        (401, 200, "gemini answer"),
-        (503, 503, None),
+        ([200], "groq answer"),
+        ([503, 200], "groq answer"),
+        ([401], None),
+        ([503, 503], None),
     ],
 )
 @pytest.mark.anyio
-async def test_groq_primary_and_gemini_fallback(
-    monkeypatch, caplog, groq_status, gemini_status, expected
-):
+async def test_groq_only_provider(monkeypatch, caplog, statuses, expected):
     calls = []
 
     class Response:
-        def __init__(self, provider, status):
+        def __init__(self, status):
             self.status_code = status
             self.headers = {}
             self.is_error = status >= 400
-            self.provider = provider
 
         def json(self):
-            if self.provider == "groq":
-                return {"choices": [{"message": {"content": "groq answer"}}]}
-            return {"candidates": [{"content": {"parts": [{"text": "gemini answer"}]}}]}
+            return {"choices": [{"message": {"content": "groq answer"}}]}
 
     class Client:
         def __init__(self, **kwargs):
@@ -234,10 +227,8 @@ async def test_groq_primary_and_gemini_fallback(
             pass
 
         async def post(self, url, **kwargs):
-            provider = "groq" if "api.groq.com" in url else "gemini"
-            calls.append((provider, kwargs))
-            status = groq_status if provider == "groq" else gemini_status
-            return Response(provider, status)
+            calls.append((url, kwargs))
+            return Response(statuses[min(len(calls) - 1, len(statuses) - 1)])
 
     async def no_wait(_seconds):
         return None
@@ -250,8 +241,6 @@ async def test_groq_primary_and_gemini_fallback(
         lambda: SimpleNamespace(
             groq_api_key=SecretStr("groq-secret"),
             groq_model="configured-model",
-            gemini_api_key=SecretStr("gemini-secret"),
-            gemini_model="gemini-configured",
         ),
     )
     if expected is None:
@@ -259,18 +248,16 @@ async def test_groq_primary_and_gemini_fallback(
             await service.generate("sensitive full prompt", "bn")
     else:
         assert await service.generate("sensitive full prompt", "bn") == expected
-    assert calls[0][0] == "groq"
+    assert all("api.groq.com" in url for url, _ in calls)
     assert calls[0][1]["headers"]["Authorization"].startswith("Bearer ")
     assert calls[0][1]["json"]["model"] == "configured-model"
-    if groq_status >= 400:
-        assert any(provider == "gemini" for provider, _ in calls)
+    assert len(calls) == len(statuses)
     assert "groq-secret" not in caplog.text
-    assert "gemini-secret" not in caplog.text
     assert "sensitive full prompt" not in caplog.text
 
 
 @pytest.mark.anyio
-async def test_groq_timeout_uses_gemini_fallback(monkeypatch, caplog):
+async def test_groq_timeout_returns_safe_unavailable(monkeypatch, caplog):
     calls = []
 
     class Client:
@@ -284,21 +271,8 @@ async def test_groq_timeout_uses_gemini_fallback(monkeypatch, caplog):
             pass
 
         async def post(self, url, **kwargs):
-            if "api.groq.com" in url:
-                calls.append("groq")
-                raise httpx.ReadTimeout("secret prompt/key should not log")
-            calls.append("gemini")
-            return type(
-                "Response",
-                (),
-                {
-                    "status_code": 200,
-                    "is_error": False,
-                    "json": lambda self: {
-                        "candidates": [{"content": {"parts": [{"text": "safe fallback"}]}}]
-                    },
-                },
-            )()
+            calls.append(url)
+            raise httpx.ReadTimeout("secret prompt/key should not log")
 
     monkeypatch.setattr(service.httpx, "AsyncClient", Client)
     monkeypatch.setattr(
@@ -307,18 +281,17 @@ async def test_groq_timeout_uses_gemini_fallback(monkeypatch, caplog):
         lambda: SimpleNamespace(
             groq_api_key=SecretStr("groq-secret"),
             groq_model="configured-model",
-            gemini_api_key=SecretStr("gemini-secret"),
-            gemini_model="gemini-configured",
         ),
     )
-    assert await service.generate("sensitive full prompt", "en") == "safe fallback"
-    assert calls == ["groq", "gemini"]
+    with pytest.raises(service.AIUnavailableError):
+        await service.generate("sensitive full prompt", "en")
+    assert len(calls) == 1 and "api.groq.com" in calls[0]
     assert "groq-secret" not in caplog.text
     assert "sensitive full prompt" not in caplog.text
 
 
 @pytest.mark.anyio
-async def test_groq_503_retries_once_then_succeeds_without_gemini(monkeypatch):
+async def test_groq_503_retries_once_then_succeeds(monkeypatch):
     calls = []
 
     class Response:
@@ -364,8 +337,6 @@ async def test_groq_503_retries_once_then_succeeds_without_gemini(monkeypatch):
         lambda: SimpleNamespace(
             groq_api_key=SecretStr("groq-secret"),
             groq_model="account-configured-model",
-            gemini_api_key=SecretStr("gemini-secret"),
-            gemini_model="gemini-configured",
         ),
     )
     assert await service.generate("prompt", "en") == "groq recovered"
@@ -389,16 +360,27 @@ def test_provider_error_does_not_expose_details(monkeypatch: pytest.MonkeyPatch)
         ai,
         "get_settings",
         lambda: SimpleNamespace(
-            groq_api_key=None,
+            groq_api_key=SecretStr("private-api-key"),
             groq_model="groq-test",
-            gemini_api_key=SecretStr("hidden"),
-            gemini_model="gemini-test",
         ),
     )
     error = ai._provider_error(service.AIUnavailableError("private upstream detail"))
     assert error.status_code == 502
     assert error.detail == "AI adviser is temporarily unavailable"
     assert "private" not in error.detail
+
+
+@pytest.mark.parametrize(("key", "configured"), [(SecretStr("hidden-key"), True), (None, False)])
+def test_ai_status_reports_groq_configuration_without_key(monkeypatch, key, configured):
+    monkeypatch.setattr(
+        ai,
+        "get_settings",
+        lambda: SimpleNamespace(groq_api_key=key, groq_model="test-groq-model"),
+    )
+    response = ai.status()
+    assert response.configured is configured
+    assert response.model == "test-groq-model"
+    assert "hidden-key" not in response.model
 
 
 def test_plant_profile_validates_device_and_lengths() -> None:
